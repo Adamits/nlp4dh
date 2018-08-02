@@ -5,12 +5,30 @@ from allennlp.models.archival import load_archive
 import spacy
 spacy.load('en_core_web_sm')
 from spacy.lang.en import English
-import datetime
+from datetime import datetime
 import argparse
+
+DEV_MODE = False
+if DEV_MODE:
+    NLP4DH_PATH = "/Users/ajwieme/nlp4dh"
+else:
+    NLP4DH_PATH = "/nlp4dh"
 
 # Tab delimited file of hardcoded mappings of
 # propbank role to SRL tag name
-MAPPING_FILE = "/Users/ajwieme/nlp4dh/lib/static/srl_mappings"
+MAPPING_FILE = NLP4DH_PATH + "/lib/static/srl_mappings"
+
+def get_date_from_string(s):
+    """
+    Turns a string in the format of a numerical year,
+    e.g. 1991, into a datetime object
+    """
+    try:
+        # This will error if it is not a datetime of that format
+        datetime.strptime(s, "%Y")
+        return s
+    except:
+        return None
 
 def doc2json(doc):
     """
@@ -30,7 +48,7 @@ def get_srl_model():
 
     HARDCODED FOR NOW
     """
-    return cached_path('/users/ajwieme/nlp4dh/models/srl-model-2018.02.27.tar.gz')
+    return cached_path(NLP4DH_PATH + '/models/srl-model-2018.02.27.tar.gz')
 
 def get_srl_mapping():
     """
@@ -97,16 +115,16 @@ def get_spans(args):
     """
     spans = {}
     srl_list = args.get("srl")
-    # [tag: {parent: ..., content: ..., span: [x, y]}]
+    # [tag: {parent: ...}, content: ..., span: [x, y]]
     if srl_list is not None:
         for srl_dict in srl_list:
             for tag, data in srl_dict.items():
-                srl = {tag: {"parent": data.get("parent"), "content": data.get("content")}}
+                srl = {tag: {"parent": data.get("parent")}}
                 span = spans.get(tuple(data.get("span")))
                 if span is not None:
                     span.update({"srl": srl})
                 else:
-                    spans[tuple(data.get("span"))] = {"srl": srl}
+                    spans[tuple(data.get("span"))] = {"srl": srl, "content": data.get("content")}
 
     flattened_spans = []
     for span, span_data in spans.items():
@@ -116,7 +134,7 @@ def get_spans(args):
     return flattened_spans
 
 
-def annotations2json(fn, sentences, srl_sentences):
+def annotations2json(fn, date, sentences, srl_sentences):
     """
     Returns a JSON of the AllenNLP output JSON,
     which can be indexed in the elasticsearch backend
@@ -126,7 +144,8 @@ def annotations2json(fn, sentences, srl_sentences):
     name = fn.split('/')[-1]
     sentence_jsons = {
         "name": name,
-        #"created_at": datetime.datetime.now().strftime("%m-%d-%Y %I:%M%p"),
+        # Right now, were only dealing with years
+        "year": date,
         "sentences": []
     }
     mapping = get_srl_mapping()
@@ -146,7 +165,16 @@ def annotations2json(fn, sentences, srl_sentences):
     return sentence_jsons
 
 def make_annotation_json(fn):
-    text = open(fn).read()
+    lines = [l.strip() for l in open(fn)]
+    # Look for a year in the first line
+    date = get_date_from_string(lines[0])
+    if date:
+        # If the first line is a year,
+        # then ignore that line and get
+        # the rest of the doc as a string
+        text = ' '.join(lines[1:])
+    else:
+        text = ' '.join(lines)
 
     # Get spacy doc
     nlp = English()
@@ -161,7 +189,38 @@ def make_annotation_json(fn):
     srl_sents = predictor.predict_batch_json(json_sentences)
 
     #print(annotations2json(fn, sentences, srl_sents))
-    return annotations2json(fn, sentences, srl_sents)
+    return annotations2json(fn, date, sentences, srl_sents)
+
+def bulk_make_annotation_json(fns=[]):
+    archive = load_archive(get_srl_model())
+    predictor = SemanticRoleLabelerPredictor.\
+                from_archive(archive, "semantic-role-labeling")
+    jsons = []
+    for fn in fns:
+        lines = [l.strip() for l in open(fn)]
+        # Look for a year in the first line
+        date = get_date_from_string(lines[0])
+        if date:
+            # If the first line is a year,
+            # then ignore that line and get
+            # the rest of the doc as a string
+            text = ' '.join(lines[1:])
+        else:
+            text = ' '.join(lines)
+
+        # Get spacy doc
+        nlp = English()
+        nlp.add_pipe(nlp.create_pipe('sentencizer'))
+        doc = nlp(text)
+
+        # Get sentencized text, and json format for AllenNLP
+        sentences, json_sentences = doc2json(doc)
+        srl_sents = predictor.predict_batch_json(json_sentences)
+
+        #print(annotations2json(fn, sentences, srl_sents))
+        jsons.append(annotations2json(fn, date, sentences, srl_sents))
+
+    return jsons
 
 if __name__=='__main__':
     parser = argparse.ArgumentParser(description="Get the json with all of the annotations")
